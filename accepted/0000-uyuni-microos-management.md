@@ -1,54 +1,74 @@
-- Feature Name: (fill with a unique ident, my_awesome_feature)
+- Feature Name: MicroOS Management
 - Start Date: (fill with today's date, YYYY-MM-DD)
 
 # Summary
 [summary]: #summary
 
-Improve the management of openSUSE MicroOS in Uyuni.
+Improve the management of openSUSE MicroOS and similar systems (e.g. openSUSE Leap Micro and SUSE Linux Micro) in Uyuni.
 
 # Motivation
 [motivation]: #motivation
 
-MicroOS, or the downstream SLE Micro, is a different operating system than e.g. SLES. It is based on the same tools and packages, with few additions on top. These additions are few, but completely change the operating model.
+openSUSE MicroOS, or the downstream SUSE Linux Micro, is a different operating system than
+e.g. SUSE Linux Enterprise. It is based on the same tools and packages, with few additions
+on top. These additions are few, but completely change the operating model. Instead of
+changing the system live, MicroOS is changed through transactions.
 
-The main idea is: **All changes go into a new btrfs snapshot. This new snapshot is "pending" until a reboot activates it.**
+The idea is: **All changes go into a new btrfs snapshot. This new snapshot is "pending" until a reboot activates it.**
+This ensures that either all changes are applied, or, if there is an issue, the system rolls back to the previous snapshot.
 
-Until now, we tried to hide the differences in Uyuni and relied on Salt to do the *right thing*. This strategy was easy for us to use, but it did not work well. We need to change the approach we take with transactional systems.
+Until now, we tried to hide this difference in Uyuni and relied on Salt to do the *right
+thing*. This strategy was easy for us to use, but it did not work well: Salt's
+`transactional_update `executor re-routes all `state.apply` calls through
+`transactional-update`. Since almost all Uyuni actions use `state.apply`, 
+effectively everything is executed in a transaction.
+
+# Overview
+1. Do not use `transactional_update` executor
+   - Uyuni calls `state.apply` or `transactional_update.apply` for internal states
+   - Custom states are applied with `state.apply` (breaking change, but allows more things to be done)
+   - Custom states they are applied with ``transactional_update.apply` (limited, but backwards compatible)
+2. Subset of internal States is supported
+3. Interal States are split into `dependencies` and `main` when `main` is called with `state.apply`
+4. UI and API updates to give control over custom states
+5. Rebooting transactional systems
+   - Automatic reboot during bootstrap via UI
+6. Fixes to service.enabled / service.disabled
+7. Out of scope: Salt Formulas, Multiple OS states in DB
 
 # Detailed design
 [design]: #detailed-design
 
-## Uyuni differentiates between OS-unchanging and OS-altering operations
-Instead of using the `transactional_update` executor, Uyuni calls either `state.apply` or `transactional_update.apply`. Uyuni is in full control of which states are applied in a new snapshot and which states are not. The SLS file is the smallest unit Salt can handle, there is no way to apply only parts of an SLS file inside a snapshot. Therefore, we split SLS files that currently mix OS-unchanging and OS-altering operations.
+## Uyuni does not use `transactional_update` executor
+The smallest unit Salt can handle is the SLS file. To control which SLS files are applied
+in a transaction or not, Uyuni stops relying on the `transactional_update` executor. Instead, Uyuni
+either calls `state.apply $list_of_sls_files` or `transactional_update.apply $list_of_sls_files`.
 
-The operations below map to SLS files. The syntax used for operations in this document is the same that's used in for Salt `top.sls`.
+All internal states that interact with the live system are applied with `state.apply.`
+Internal states that change the operating system, e.g. by installing packages, are applied
+with `transactional_update.apply`. Today, many of our SLS files combine installing packages
+and making use of them directly. That does not work on transactional systems, those SLS
+files need to be split.
 
-### Multiple approaches to running operations
+At a later time, users are given the choice for their custom states on a per-SLS basis.
+Since that requires quite a bit of work on the database schema, UI and API, we add
+configurable default: `java.salt_custom_states_use_transactional_update = True`. This
+default is the same as today to allow for backwards-compatibility for existing SLS files.
 
-Uyuni's WebUI and API are changed to expose the different ways of running operations, based on the categorization below.
+### Internal States Filesystem Structure
+Up to now, we bundle prerequisites (e.g. package installations) with the main part in SLS
+files. Since that does not work on transactional, we're now using the following structure:
 
-1. `state.apply <mods>`
-2. `transactional_update.apply <mods>`
-3. `transactional_update.apply <mods> activate_transaction=True`
+``` text
+hardware/
+        prereq.sls
+        profileupdate.sls
+ansible/
+        prereq.sls
+        runplaybook.sls
+```
 
-Previously, everything used the first way (`state.apply`). To enable the new ways that use `transactional_update`, the Java code needs to be updated. The job result of `transcational_update.apply` is compatible with `state.apply`, only the function that's called needs to be changed.
-
-Built-in operations that in the "OS-unchanging operations" section are executed with `state.apply`, "OS-altering operations" are executed with `transactional_update.apply`. Some operations, like those defined by users, need to ask the user how they should be executed.
-
-The WebUI for custom states, recurring states, remote commands and oscap are changed to let the user decide which option should be used. The difference between 2. and 3. could be implemented with a checkbox.
-
-Like the WebUI, the API needs to be adapted to allow the user to choose, e.g. how recurring states are applied.
-
-### Uncategorized operations
-
-- `virt.*`: About to be dropped
-- `bootloader`: TODO
-- `rebootifneeded` - The way this is written is incompatible with transactional systems
-
-### OS-unchanging operations
-
-These operations do not alter the system, i.e. they don't belong in a (new) snapshot. Uyuni applies them with `state.apply` for two reasons: structured output and no concurrency (`queue=True`).
-
+### Internal States → `state.apply`
 - `ansible.runplaybook`
 - `cocoattest.requestdata`
 - `hardware.profileupdate`
@@ -60,15 +80,7 @@ These operations do not alter the system, i.e. they don't belong in a (new) snap
 - `util.systeminfo_full`
 - `util.systeminfo`
 
-#### Required Changes
-
-- Extract installation steps in `cocoattest` to a new SLS
-- Extract `dmidecode` installation steps in `hardware.profileupdate` to a new SLS
-
-### OS-altering operations
-
-These operations alter the operating system itself, i.e. they belong in a (new) snapshot. Uyuni applies them with `transactional_update.apply`, unless otherwise noted.
-
+### Internal States → `transactional_update.apply`
 - `ansible`
 - `appstreams.configure`
 - `bootstrap` - special case, it's always applied with `state.apply` because Uyuni does not know if the target uses `transactional-update`
@@ -97,16 +109,27 @@ These operations alter the operating system itself, i.e. they belong in a (new) 
 - `util.mgr_start_event_grains` NOTE: configures in `/etc`
 - `util.mgr_switch_to_venv_minion`
 
-### Either OS-unchanging or OS-altering operations
-
-These operations can be either OS-unchanging or OS-altering because they are to generic to know ahead of time. Users need to have control over the way these Salt states are applied.
+### Configurable States -> `java.salt_custom_states_use_transactional_update`
 
 -   `custom`
 -   `custom_groups`
 -   `custom_org`
 -   `recurring`
 -   `remotecommands`
+
+#### Required Changes
+
+- Extract installation steps in `cocoattest` to a `cocoattest.prereq`
+- Extract `dmidecode` installation steps in `hardware.profileupdate` to `hardware.prereq`
+
+
+### Uncategorized operations
+
+- `bootloader`: TODO
+- `rebootifneeded` - The way this is written is incompatible with transactional systems
 -   `scap` NOTE: `remediate=True` is likely OS-altering
+
+
 
 ## Automatic reboots during bootstrapping
 

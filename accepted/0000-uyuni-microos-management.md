@@ -24,12 +24,7 @@ thing*. This strategy was easy for us to use, but it did not work well: Salt's
 effectively everything is executed in a transaction.
 
 # Overview
-1. Do not use `transactional_update` executor
-   - Uyuni calls `state.apply` or `transactional_update.apply` for internal states
-   - Custom states are applied with `state.apply` (breaking change, but allows more things to be done)
-   - Custom states they are applied with ``transactional_update.apply` (limited, but backwards compatible)
-2. Subset of internal States is supported
-3. Interal States are split into `dependencies` and `main` when `main` is called with `state.apply`
+
 4. UI and API updates to give control over custom states
 5. Rebooting transactional systems
    - Automatic reboot during bootstrap via UI
@@ -109,6 +104,10 @@ ansible/
 - `util.mgr_start_event_grains` NOTE: configures in `/etc`
 - `util.mgr_switch_to_venv_minion`
 
+### Unsupported Internal States
+- `rebootifneeded` - The way this is written is incompatible with transactional systems
+* 
+
 ### Configurable States -> `java.salt_custom_states_use_transactional_update`
 
 -   `custom`
@@ -123,27 +122,36 @@ ansible/
 - Extract `dmidecode` installation steps in `hardware.profileupdate` to `hardware.prereq`
 
 
-### Uncategorized operations
+### TODO
 
 - `bootloader`: TODO
-- `rebootifneeded` - The way this is written is incompatible with transactional systems
--   `scap` NOTE: `remediate=True` is likely OS-altering
-
-
+- `scap` NOTE: `remediate=True` is likely OS-altering
 
 ## Automatic reboots during bootstrapping
 
-When bootstrapping a new system, Uyuni relies on information present on the client system to know what kind of system it is. This includes finding out if the new system is a transactional system. Bootstrapping happens with Salt SSH and `state.apply`. The bootstrap SLS file contains logic to install our Salt Minion package correctly on both traditionally-managed and transactional systems.
+When bootstrapping a new system, Uyuni relies on information present on the client system
+to know what kind of system it is. This includes finding out if the new system is a
+transactional system. Bootstrapping happens with Salt SSH and `state.apply`. The bootstrap
+SLS file contains logic to install our Salt Minion package correctly on both
+traditionally-managed and transactional systems.
 
 The bootstrap SLS file installs the Salt Minion package into the next snapshot. We need to reboot the Minion after installing this package.
 
 ### Add Inhibitor Lock to Salt SSH
 
-Applications can set _inhibitor locks_ to block or delay system shutdown and sleep states. Salt SSH sets a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt SSH has time to return job results back to the Salt Master, unless it takes longer than _InhibitDelayMaxSecs_. This config setting is specified in `logind.conf(5)` and can't be overridden by Salt SSH. The default is 5 seconds.
+Applications can set _inhibitor locks_ to block or delay system shutdown and sleep states.
+Salt SSH sets a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt
+SSH has time to return job results back to the Salt Master, unless it takes longer than
+_InhibitDelayMaxSecs_. This config setting is specified in `logind.conf(5)` and can't be
+overridden by Salt SSH. The default is 5 seconds.
 
 ### Request a reboot without delay
 
-With a delay lock taken, `bootstrap/init.sls` can request a reboot from systemd from the main process. The reboot will be delayed until Salt SSH execution terminates and releases the lock.
+With a delay lock taken, `bootstrap/init.sls` can request a reboot from systemd from the
+main process. The reboot will be delayed until Salt SSH execution terminates and releases
+the lock.
+
+# Bug Fixes
 
 ## Make state functions available for transactional systems
 
@@ -155,11 +163,7 @@ With a delay lock taken, `bootstrap/init.sls` can request a reboot from systemd 
 [drawbacks]: #drawbacks
 
 Why should we **not** do this?
-
-  * obscure corner cases
-  * will it impact performance?
-  * what other parts of the product will be affected?
-  * will the solution be hard to maintain in the future?
+  * 
 
 # Alternatives
 [alternatives]: #alternatives

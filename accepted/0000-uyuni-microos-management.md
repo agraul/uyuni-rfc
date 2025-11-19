@@ -6,23 +6,6 @@
 
 Improve the management of openSUSE MicroOS and similar systems (e.g. openSUSE Leap Micro and SUSE Linux Micro) in Uyuni.
 
-# Motivation
-[motivation]: #motivation
-
-openSUSE MicroOS, or the downstream SUSE Linux Micro, is a different operating system than
-e.g. SUSE Linux Enterprise. It is based on the same tools and packages, with few additions
-on top. These additions are few, but completely change the operating model. Instead of
-changing the system live, MicroOS is changed through transactions.
-
-The idea is: **All changes go into a new btrfs snapshot. This new snapshot is "pending" until a reboot activates it.**
-This ensures that either all changes are applied, or, if there is an issue, the system rolls back to the previous snapshot.
-
-Until now, we tried to hide this difference in Uyuni and relied on Salt to do the *right
-thing*. This strategy was easy for us to use, but it did not work well: Salt's
-`transactional_update `executor re-routes all `state.apply` calls through
-`transactional-update`. Since almost all Uyuni actions use `state.apply`, 
-effectively everything is executed in a transaction.
-
 # Overview
 
 4. UI and API updates to give control over custom states
@@ -34,7 +17,7 @@ effectively everything is executed in a transaction.
 # Detailed design
 [design]: #detailed-design
 
-## Uyuni does not use `transactional_update` executor
+## Uyuni does not use `transactional_update` executor anymore
 The smallest unit Salt can handle is the SLS file. To control which SLS files are applied
 in a transaction or not, Uyuni stops relying on the `transactional_update` executor. Instead, Uyuni
 either calls `state.apply $list_of_sls_files` or `transactional_update.apply $list_of_sls_files`.
@@ -46,9 +29,10 @@ and making use of them directly. That does not work on transactional systems, th
 files need to be split.
 
 At a later time, users are given the choice for their custom states on a per-SLS basis.
-Since that requires quite a bit of work on the database schema, UI and API, we add
-configurable default: `java.salt_custom_states_use_transactional_update = True`. This
-default is the same as today to allow for backwards-compatibility for existing SLS files.
+Since that requires quite a bit of work on the database schema, UI and API, we go for an
+all-or-nothing approach first. We add a new config value:
+`java.salt_custom_states_use_transactional_update = True`. This value defaults to the same
+behaviour as today, in order to allow for backwards-compatibility for existing SLS files.
 
 ### Internal States Filesystem Structure
 Up to now, we bundle prerequisites (e.g. package installations) with the main part in SLS
@@ -63,7 +47,8 @@ ansible/
         runplaybook.sls
 ```
 
-### Internal States → `state.apply`
+### Internal States (`state.apply`)
+- `actionachains.{startssh,resumessh}`
 - `ansible.runplaybook`
 - `cocoattest.requestdata`
 - `hardware.profileupdate`
@@ -75,10 +60,8 @@ ansible/
 - `util.systeminfo_full`
 - `util.systeminfo`
 
-### Internal States → `transactional_update.apply`
-- `ansible`
-- `appstreams.configure`
-- `bootstrap` - special case, it's always applied with `state.apply` because Uyuni does not know if the target uses `transactional-update`
+### Internal States (`transactional_update.apply`)
+- `ansible` - rename to `ansible.prereq`
 - `certs`
 - `channels`
 - `cleanup_minion`
@@ -106,9 +89,11 @@ ansible/
 
 ### Unsupported Internal States
 - `rebootifneeded` - The way this is written is incompatible with transactional systems
-* 
+- `appstreams.configure` - only useful for RHEL systems
+- REVIEW `bootstrap.autoinstall` - Uyuni does not know that it targets a transactional system but
+  this state only works with `transactional_update.apply`
 
-### Configurable States -> `java.salt_custom_states_use_transactional_update`
+### Configurable States (`java.salt_custom_states_use_transactional_update`)
 
 -   `custom`
 -   `custom_groups`
@@ -121,10 +106,8 @@ ansible/
 - Extract installation steps in `cocoattest` to a `cocoattest.prereq`
 - Extract `dmidecode` installation steps in `hardware.profileupdate` to `hardware.prereq`
 
-
 ### TODO
 
-- `bootloader`: TODO
 - `scap` NOTE: `remediate=True` is likely OS-altering
 
 ## Automatic reboots during bootstrapping
@@ -163,7 +146,8 @@ the lock.
 [drawbacks]: #drawbacks
 
 Why should we **not** do this?
-  * 
+* More work for us maintaining SLS files with the new layout, as we need to think were to put different states
+* 
 
 # Alternatives
 [alternatives]: #alternatives

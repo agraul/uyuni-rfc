@@ -4,39 +4,32 @@
 # Summary
 [summary]: #summary
 
-Improve the management of openSUSE MicroOS and similar systems (e.g. openSUSE Leap Micro and SUSE Linux Micro) in Uyuni.
-
-# Overview
-
-4. UI and API updates to give control over custom states
-5. Rebooting transactional systems
-   - Automatic reboot during bootstrap via UI
-6. Fixes to service.enabled / service.disabled
-7. Out of scope: Salt Formulas, Multiple OS states in DB
+Improve the management of [openSUSE MicroOS](https://microos.opensuse.org) and similar systems (e.g. openSUSE Leap Micro and SUSE
+Linux Micro) in Uyuni.
 
 # Detailed design
 [design]: #detailed-design
 
 ## Uyuni does not use `transactional_update` executor anymore
-The smallest unit Salt can handle is the SLS file. To control which SLS files are applied
-in a transaction or not, Uyuni stops relying on the `transactional_update` executor. Instead, Uyuni
-either calls `state.apply $list_of_sls_files` or `transactional_update.apply $list_of_sls_files`.
+The smallest unit Salt can handle is the SLS file. To control which SLS files are applied in a
+transaction or not, Uyuni stops relying on the `transactional_update` executor. Instead, Uyuni either
+calls `state.apply $list_of_sls_files` or `transactional_update.apply $list_of_sls_files`.
 
-All internal states that interact with the live system are applied with `state.apply.`
-Internal states that change the operating system, e.g. by installing packages, are applied
-with `transactional_update.apply`. Today, many of our SLS files combine installing packages
-and making use of them directly. That does not work on transactional systems, those SLS
-files need to be split.
+All internal states that interact with the live system are applied with `state.apply.` Internal states
+that change the operating system, e.g. by installing packages, are applied with
+`transactional_update.apply`. Today, many of our SLS files combine installing packages and making use
+of them directly. That does not work on transactional systems, those SLS files need to be split.
 
-At a later time, users are given the choice for their custom states on a per-SLS basis.
-Since that requires quite a bit of work on the database schema, UI and API, we go for an
-all-or-nothing approach first. We add a new config value:
-`java.salt_custom_states_use_transactional_update = True`. This value defaults to the same
-behaviour as today, in order to allow for backwards-compatibility for existing SLS files.
+Custom states give users a lot of flexibility managing their systems, which makes it hard for Uyuni
+to know how to apply these states. To give some control to the user, we add a new config value:
+`java.salt_custom_states_use_transactional_update = True`. This config value controls whether
+`transactional_update.apply` is used for all custom states applied from the Java backend. The
+default is `true`, which is the same behaviour as today, to keep backwards-compatibility with
+existing SLS files.
 
 ### Internal States Filesystem Structure
-Up to now, we bundle prerequisites (e.g. package installations) with the main part in SLS
-files. Since that does not work on transactional, we're now using the following structure:
+Up to now, we bundle prerequisites (e.g. package installations) with the main part in SLS files.
+Since that does not work on transactional, we're now using the following structure:
 
 ``` text
 hardware/
@@ -47,10 +40,18 @@ ansible/
         runplaybook.sls
 ```
 
-### Internal States (`state.apply`)
+### Internal States Application
+The Java backend maintains a list of SLS files in the `SaltParameters` class. This catalogue will be
+enhanced with a hard-coded mapping of SLS files to the respective Salt function (`state.apply` or
+`transactional_update.apply`).
+
+Some states need to be split into two SLS files, one for prerequisites and a second for the actual
+work. The Java backend code first trigger the prerequisites state. When that job returns
+successfully, Uyuni reacts with the "actual work" state without any further user interaction.
+
+### Internal States - `state.apply`
 - `actionachains.{startssh,resumessh}`
 - `ansible.runplaybook`
-- `cocoattest.requestdata`
 - `hardware.profileupdate`
 - `images.*`
 - `packages.profileupdate`
@@ -60,13 +61,13 @@ ansible/
 - `util.systeminfo_full`
 - `util.systeminfo`
 
-### Internal States (`transactional_update.apply`)
+### Internal States - `transactional_update.apply`
 - `ansible` - rename to `ansible.prereq`
 - `certs`
 - `channels`
 - `cleanup_minion`
 - `cleanup_ssh_minion`
-- `configuration.deploy_files` NOTE: reconfiguring a service through `/etc` is special as there is an overlayfs.
+
 - `distupgrade`
 - `packages.patch*`
 - `packages.pkg*`
@@ -88,72 +89,96 @@ ansible/
 - `util.mgr_switch_to_venv_minion`
 
 ### Unsupported Internal States
-- `rebootifneeded` - The way this is written is incompatible with transactional systems
+Not all internal states we have make sense on SL Micro.
+
 - `appstreams.configure` - only useful for RHEL systems
-- REVIEW `bootstrap.autoinstall` - Uyuni does not know that it targets a transactional system but
-  this state only works with `transactional_update.apply`
+- `cocoattest.requestdata`- only supports SLES 15 SP6
+- `bootstrap.autoinstall` - Uyuni might not know that it targets a transactional system but
+  this state would only work with `transactional_update.apply`
+- `rebootifneeded` - The way this is written is incompatible with transactional systems
 
 ### Configurable States (`java.salt_custom_states_use_transactional_update`)
-
 -   `custom`
 -   `custom_groups`
 -   `custom_org`
 -   `recurring`
 -   `remotecommands`
 
-#### Required Changes
-
+### Required Changes
 - Extract installation steps in `cocoattest` to a `cocoattest.prereq`
 - Extract `dmidecode` installation steps in `hardware.profileupdate` to `hardware.prereq`
 
-### TODO
-
+### Still TODO
 - `scap` NOTE: `remediate=True` is likely OS-altering
+- `configuration.deploy_files` depends on the location a file is placed. For `/etc`, both ways are
+  often okay.
 
 ## Automatic reboots during bootstrapping
+Uyuni bootstraps new systems through different mechanism: `state.apply` over Salt SSH, running a
+bash script, or by reacting to a newly connected Salt Minion. During the bootstrap procedure, Uyuni
+installs the Salt Bundle on the client. This requires a reboot of transactional systems.
 
-When bootstrapping a new system, Uyuni relies on information present on the client system
-to know what kind of system it is. This includes finding out if the new system is a
-transactional system. Bootstrapping happens with Salt SSH and `state.apply`. The bootstrap
-SLS file contains logic to install our Salt Minion package correctly on both
-traditionally-managed and transactional systems.
+### `state.apply` over Salt SSH
+This is the mechanism used when users navigate to "Systems > Bootstrapping" in the WebUI.
 
-The bootstrap SLS file installs the Salt Minion package into the next snapshot. We need to reboot the Minion after installing this package.
+Uyuni targets the new system with Salt SSH and always uses `state.apply` to apply the `bootstrap`
+state. This is required because Uyuni relies on information collected on the client system to know
+what kind of system it is. This includes finding out if the new system is a transactional system.
+The `bootstrap`state install our Salt Bundle package correctly on both traditionally-managed and
+transactional systems. 
+
+Triggering a reboot over Salt SSH has one problem: rebooting before Salt finishes loses the job data
+of the `bootstrap` state. This can be avoided by systemd feature called "Inhibitor Lock", which can
+delay a shutdown request while Salt SSH runs.
 
 ### Add Inhibitor Lock to Salt SSH
+Applications can set _inhibitor locks_ to block or delay system shutdown and sleep states. Salt SSH
+sets a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt SSH has time to
+return job results back to the Salt Master, unless it takes longer than _InhibitDelayMaxSecs_. This
+config setting is specified in `logind.conf(5)` and can't be overridden by Salt SSH. The default is
+5 seconds. When Salt SSH requires more than 5 seconds to return the job data, we still lose it and
+can't proceed with the bootstrapping procedure.
 
-Applications can set _inhibitor locks_ to block or delay system shutdown and sleep states.
-Salt SSH sets a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt
-SSH has time to return job results back to the Salt Master, unless it takes longer than
-_InhibitDelayMaxSecs_. This config setting is specified in `logind.conf(5)` and can't be
-overridden by Salt SSH. The default is 5 seconds.
+### Request a reboot
+With a delay inhibitor lock taken, the `bootstrap` state requests a reboot from systemd. Systemd
+will accept the request immediately but delay the shutdown until the Salt SSH execution terminates
+and releases the inhibitor lock.
 
-### Request a reboot without delay
+### Bootstrap script
+The bootstrap bash script already handles rebooting the system after installing the Salt Bundle.
 
-With a delay lock taken, `bootstrap/init.sls` can request a reboot from systemd from the
-main process. The reboot will be delayed until Salt SSH execution terminates and releases
-the lock.
+### "Salt-initiated" bootstrap
+This method is used by users with large environments. They often have their own custom OS images and
+want to bootstrap new systems with little manual intervention.
+
+This bootstrap only needs to install the Salt Bundle when it is executed with the Salt Minion from
+the distribution. As part of the bootstrap procedure, a Salt highstate will replace the installed
+Salt Minion package with our Salt Bundle package. Users are advised to include the Salt Bundle into
+their OS images to avoid the reboot after switching from the distribution's Salt Minion to Salt Bundle. 
 
 # Bug Fixes
-
 ## Make state functions available for transactional systems
+`service.enabled` and `service.disabled` currently need a dbus connection. Dbus is not available
+inside a transaction since transactions must not be able to break the live system.
 
--   `service.enabled`: currently needs dbus, we need a way that does not require dbus for enabling the service
--   `service.disabled` currently needs dbus, we need a way that does not require dbus for enabling the service
-
+The `service`state module will be changed to work without a dbus connection for these operations.
 
 # Drawbacks
 [drawbacks]: #drawbacks
 
 Why should we **not** do this?
 * More work for us maintaining SLS files with the new layout, as we need to think were to put different states
-* 
+* We don't know if all features need to work for transactional systems since they are managed differently.
 
 # Alternatives
 [alternatives]: #alternatives
 
-- What other designs/options have been considered?
-- What is the impact of not doing this?
+- Full control over custom states for the user. Requires changes to the WebUI / API and database
+  schema. This is something we could do later if the global config approach is not enough.
+- Support for two system states ("live" and "next") in the database, WebUI and API. This would allow
+  users to know not only what the current live system looks like, but also how it will look like
+  after a reboot. This is a lot of work, everything expects a system to be in a singular state all the time.
+- Make sure a small subset of SLS files work on transactional systems and document the rest as unsupported.
 
 # Unresolved questions
 [unresolved]: #unresolved-questions

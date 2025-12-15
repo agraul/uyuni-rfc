@@ -15,13 +15,13 @@ The smallest unit Salt can handle is the SLS file. To control which SLS files ar
 transaction or not, Uyuni stops relying on the `transactional_update` executor. Instead, Uyuni either
 calls `state.apply $list_of_sls_files` or `transactional_update.apply $list_of_sls_files`.
 
-All internal states that interact with the live system are applied with `state.apply.` Internal states
+All internal states that interact with the live system are applied with `state.apply.`. Internal states
 that change the operating system, e.g. by installing packages, are applied with
-`transactional_update.apply`. Today, many of our SLS files combine installing packages and making use
-of them directly. That does not work on transactional systems, those SLS files need to be split.
+`transactional_update.apply`. Today, many of our SLS files combine installing and using packages. 
+That does not fit the transactional model and we need to split these SLS files.
 
 Custom states give users a lot of flexibility managing their systems, which makes it hard for Uyuni
-to know how to apply these states. To give some control to the user, we add a new config value:
+to know how to apply custom states. To give some control to the user, we add a new config value:
 `java.salt_custom_states_use_transactional_update = True`. This config value controls whether
 `transactional_update.apply` is used for all custom states applied from the Java backend. The
 default is `true`, which is the same behaviour as today, to keep backwards-compatibility with
@@ -52,52 +52,65 @@ successfully, Uyuni reacts with the "actual work" state without any further user
 ### Internal States - `state.apply`
 - `actionachains.{startssh,resumessh}`
 - `ansible.runplaybook`
+- `bootstrap.set_proxy`
+- `cleanup_minion` (works with both)
+- `cleanup_ssh_minion`
 - `hardware.profileupdate`
+- `hardware.virtprofile`
 - `images.*`
 - `packages.profileupdate`
 - `packages.redhatproductinfo`
-- `srvmonitoring.status`
-- `util.sync*`
-- `util.systeminfo_full`
-- `util.systeminfo`
-
-### Internal States - `transactional_update.apply`
-- `ansible` - rename to `ansible.prereq`
-- `certs`
-- `channels`
-- `cleanup_minion`
-- `cleanup_ssh_minion`
-
-- `distupgrade`
-- `packages.patch*`
-- `packages.pkg*`
-- `packages`
+- `proxy.apply_proxy_config`
 - `reboot`
 - `services.docker`
 - `services.kiwi-image-server`
 - `services.reportdb-user`
-- `services.salt-minion` REVIEW: Is all of this still needed? NOTE: `file.managed` in `/etc`
+- `services.salt-minion`
 - `srvmonitoring.disable`
 - `srvmonitoring.enable`
-- `switch_to_bundle`
-- `update-salt`
-- `uptodate`
-- `util.disable_fqdns_grain`: NOTE: configures in `/etc`, restarts a service (currently broken)
-- `util.mgr_mine_config_clean_up`: NOTE: configures in `/etc`, restarts a service (currently broken)
+- `srvmonitoring.status`
+- `supportdata.gather` (new)
+- `util.disable_fqdns_grain`
+- `util.mgr_mine_config_clean_up`
 - `util.mgr_rotate_saltssh_key`
-- `util.mgr_start_event_grains` NOTE: configures in `/etc`
+- `util.mgr_start_event_grains`
+- `util.sync*`
+- `util.systeminfo`
+- `util.systeminfo_full`
+
+### Internal States - `transactional_update.apply`
+- `ansible.prereq` (renamed from `init.sls`)
+- `certs`
+- `channels` (installs packages)
+- `cleanup_minion` (works with both)
+- `distupgrade`
+- `hardware.prereq` (new)
+- `packages.patch*`
+- `packages.pkg*`
+- `packages.prereq` (renamed from `init.sls`)
+- `services.docker_prereqs`
+- `services.kiwi-image-server_prereqs`
+- `services.reportdb-user_prereqs`
+- `services.salt-minion_prereqs`
+- `supportdata.prereq` (renamed from `init.sls`)
+- `switch_to_bundle.mgr_switch_to_venv_minion`
+- `update-salt`
 - `util.mgr_switch_to_venv_minion`
 
+
 ### Unsupported Internal States
-Not all internal states we have make sense on SL Micro.
+Not all internal states we have make sense on MicroOS / SUSE Linux Micro. These states are unsupported.
 
 - `appstreams.configure` - only useful for RHEL systems
+- `bootstrap.remove_traditional_stack` - traditional stack was never supported on these systems
 - `cocoattest.requestdata`- only supports SLES 15 SP6
-- `bootstrap.autoinstall` - Uyuni might not know that it targets a transactional system but
-  this state would only work with `transactional_update.apply`
 - `rebootifneeded` - The way this is written is incompatible with transactional systems
+- `uptodate` - The way this is written is incompatible with transactional systems
 
 ### Configurable States (`java.salt_custom_states_use_transactional_update`)
+These states could either be applied with `state.apply` or `transactional_update.apply`. The Java
+backend code consults `java.salt_custom_states_use_transactional_update` to decide how to apply them.
+
 -   `custom`
 -   `custom_groups`
 -   `custom_org`
@@ -105,16 +118,17 @@ Not all internal states we have make sense on SL Micro.
 -   `remotecommands`
 
 ### Required Changes
-- Extract installation steps in `cocoattest` to a `cocoattest.prereq`
 - Extract `dmidecode` installation steps in `hardware.profileupdate` to `hardware.prereq`
+- Split `services.*` states and extract package installation steps
 
-### Still TODO
+### States not yet categorized 
+- `bootstrap.autoinstall`
+- `channels.gpg-keys`
 - `scap` NOTE: `remediate=True` is likely OS-altering
-- `configuration.deploy_files` depends on the location a file is placed. For `/etc`, both ways are
-  often okay.
-
+- `configuration.*` depends on path to the deployed/analyzed file
+  
 ## Automatic reboots during bootstrapping
-Uyuni bootstraps new systems through different mechanism: `state.apply` over Salt SSH, running a
+Uyuni bootstraps new systems through different mechanisms: `state.apply` over Salt SSH, running a
 bash script, or by reacting to a newly connected Salt Minion. During the bootstrap procedure, Uyuni
 installs the Salt Bundle on the client. This requires a reboot of transactional systems.
 
@@ -131,15 +145,15 @@ Triggering a reboot over Salt SSH has one problem: rebooting before Salt finishe
 of the `bootstrap` state. This can be avoided by systemd feature called "Inhibitor Lock", which can
 delay a shutdown request while Salt SSH runs.
 
-### Add Inhibitor Lock to Salt SSH
+#### Add Inhibitor Lock to Salt SSH
 Applications can set _inhibitor locks_ to block or delay system shutdown and sleep states. Salt SSH
-sets a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt SSH has time to
-return job results back to the Salt Master, unless it takes longer than _InhibitDelayMaxSecs_. This
-config setting is specified in `logind.conf(5)` and can't be overridden by Salt SSH. The default is
-5 seconds. When Salt SSH requires more than 5 seconds to return the job data, we still lose it and
-can't proceed with the bootstrapping procedure.
+will be changed to set a _delay_ inhibitor lock to stop the system from rebooting immediately. Salt
+SSH has time to return job results back to the Salt Master, unless it takes longer than
+_InhibitDelayMaxSecs_. This config setting is specified in `logind.conf(5)` and can't be overridden
+by Salt SSH. The default is 5 seconds. When Salt SSH requires more than 5 seconds to return the job
+data, we still lose it and can't proceed with the bootstrapping procedure.
 
-### Request a reboot
+#### Request a reboot
 With a delay inhibitor lock taken, the `bootstrap` state requests a reboot from systemd. Systemd
 will accept the request immediately but delay the shutdown until the Salt SSH execution terminates
 and releases the inhibitor lock.

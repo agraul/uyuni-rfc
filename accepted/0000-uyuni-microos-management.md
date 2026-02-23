@@ -49,6 +49,18 @@ Some states need to be split into two SLS files, one for prerequisites and a sec
 work. The Java backend code first trigger the prerequisites state. When that job returns
 successfully, Uyuni reacts with the "actual work" state without any further user interaction.
 
+#### Example Workflow with Salt CLI
+The following example first installs prerequisites for the `hardware.profileupdate` state, reboots
+the minion and then triggers the `hardware.profileupdate`.
+
+```sh
+% mgrctl exec 'salt --async slmicro61 transactional_update.apply hardware.prereq activate_transaction=True'
+% mgrctl -it exec 'salt-run state.event salt/minion/slmicro61/start count=1 && salt slmicro61 state.apply hardware.profileupdate'
+```
+
+This mimics an action chain of `transactional_update.apply hardware.prereq -> reboot -> state.apply hardware.profileupdate`.
+
+
 ### Internal States - `state.apply`
 - `actionachains.{startssh,resumessh}`
 - `ansible.runplaybook`
